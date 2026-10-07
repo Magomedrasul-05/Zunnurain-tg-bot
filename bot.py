@@ -4,7 +4,7 @@ import sqlite3
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.client.session.aiohttp import AiohttpSession
-from aiohttp import ProxyConnector
+from aiohttp_socks import ProxyConnector
 from dotenv import load_dotenv
 import os
 
