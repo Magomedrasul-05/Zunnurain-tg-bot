@@ -1,22 +1,30 @@
 import asyncio
 import logging
 import sqlite3
+import os
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.client.session.aiohttp import AiohttpSession
 from dotenv import load_dotenv
-import os
 
-# Загрузка переменных окружения
+# Загрузка переменных окружения из файла .env
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
-PROXY_URL = os.getenv("PROXY_URL") # например: http://user:pass@ip:port
+PROXY_URL = os.getenv("PROXY_URL")  # например: socks5h://user:pass@ip:port
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# Инициализация БД (Персональные данные хранятся локально в РФ)
+
+# ============================================
+# Инициализация базы данных (ПДн хранятся локально в РФ)
+# ============================================
 def init_db():
+    """Создаёт таблицу пользователей, если её нет."""
     conn = sqlite3.connect('users_data.db')
     cursor = conn.cursor()
     cursor.execute('''
@@ -24,56 +32,109 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             username TEXT,
             full_name TEXT,
-            phone_number TEXT
+            phone_number TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     conn.commit()
     conn.close()
+    logger.info("База данных инициализирована")
 
-# Настройка прокси для aiogram
+
+# ============================================
+# Создание бота с прокси
+# ============================================
 async def create_bot_and_dp():
-    connector = ProxyConnector.from_url(PROXY_URL)
-    session = AiohttpSession(connector=connector)
+    """Создаёт экземпляр бота с подключением через прокси."""
+    # aiogram 3.x принимает URL прокси напрямую через параметр proxy
+    session = AiohttpSession(proxy=PROXY_URL)
     bot = Bot(token=TOKEN, session=session)
     dp = Dispatcher()
     return bot, dp
 
-# --- Хэндлеры ---
+
+# ============================================
+# Обработчики команд
+# ============================================
 async def cmd_start(message: types.Message):
-    await message.answer("Привет! Я бот, работающий через прокси. Введите свой номер телефона для регистрации.")
-    # В реальности здесь должна быть кнопка request_contact или текстовый ввод
+    """Обработчик команды /start."""
+    await message.answer(
+        "Привет! 👋\n\n"
+        "Я бот, работающий через прокси на серверах в РФ.\n"
+        "Ваши персональные данные хранятся локально в соответствии с 152-ФЗ.\n\n"
+        "Введите свой номер телефона для регистрации."
+    )
+
 
 async def handle_phone(message: types.Message):
+    """Обработчик текстовых сообщений (сохраняет номер телефона)."""
     user_id = message.from_user.id
-    username = message.from_user.username
-    full_name = message.from_user.full_name
-    phone = message.text # Упрощенно, в реальности лучше использовать Contact KeyboardButton
+    username = message.from_user.username or "unknown"
+    full_name = message.from_user.full_name or "unknown"
+    phone = message.text
 
     # Сохраняем ПДн в локальную БД
-    conn = sqlite3.connect('users_data.db')
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO users (user_id, username, full_name, phone_number) VALUES (?, ?, ?, ?)",
-                   (user_id, username, full_name, phone))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect('users_data.db')
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO users (user_id, username, full_name, phone_number) "
+            "VALUES (?, ?, ?, ?)",
+            (user_id, username, full_name, phone)
+        )
+        conn.commit()
+        conn.close()
+        logger.info(f"Сохранены данные пользователя {user_id}")
 
-    await message.answer("Спасибо! Ваши данные успешно сохранены на серверах в РФ.")
+        await message.answer(
+            "✅ Спасибо! Ваши данные успешно сохранены на серверах в РФ."
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении данных: {e}")
+        await message.answer("❌ Произошла ошибка при сохранении данных. Попробуйте позже.")
 
-# --- Запуск ---
+
+# ============================================
+# Главная функция запуска
+# ============================================
 async def main():
+    """Точка входа в приложение."""
+    # Проверка наличия необходимых переменных окружения
+    if not TOKEN:
+        logger.error("BOT_TOKEN не найден в .env файле!")
+        return
+    if not PROXY_URL:
+        logger.error("PROXY_URL не найден в .env файле!")
+        return
+
+    # Инициализация БД
     init_db()
+
+    # Создание бота и диспетчера
     bot, dp = await create_bot_and_dp()
-    
+
+    # Регистрация обработчиков
     dp.message.register(cmd_start, CommandStart())
-    dp.message.register(handle_phone, F.text) # Упрощенный прием текста как номера
+    dp.message.register(handle_phone, F.text)
 
-    # Пропускаем старые обновления, чтобы бот не спамил при перезапуске
+    # Удаляем webhook и пропускаем старые обновления
     await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("Бот успешно запущен через прокси!")
-    await dp.start_polling(bot)
 
+    logger.info("Бот успешно запущен через прокси!")
+    logger.info(f"Прокси: {PROXY_URL}")
+
+    # Запуск polling
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
+
+
+# ============================================
+# Запуск приложения
+# ============================================
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logging.info("Бот остановлен")
+        logger.info("Бот остановлен пользователем")
